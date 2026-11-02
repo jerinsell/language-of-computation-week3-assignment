@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ingestion Report</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --card: #ffffff; --text: #1f2328; --muted: #656d76; --line: #d8dee4;
+    --accent: #2f6feb; --ok: #1a7f37; --bad: #cf222e; --warn: #9a6700; --chip: #eef1f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #171a21; --text: #e6e8eb; --muted: #9aa4b0; --line: #2b313b;
+      --accent: #6ea8fe; --ok: #4ac26b; --bad: #ff7b72; --warn: #d29922; --chip: #222833;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { margin: 0 0 4px; font-size: 26px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .open { display: inline-block; background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+          padding: 10px 18px; font-size: 15px; font-weight: 600; cursor: pointer; }
+  .open:focus-visible { outline: 3px solid var(--text); outline-offset: 2px; }
+  #file { display: none; }
+  #status { margin: 12px 0 24px; color: var(--muted); }
+  #status.error { color: var(--bad); font-weight: 600; }
+  .run { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px;
+         margin-bottom: 20px; }
+  .run h2 { margin: 0; font-size: 18px; }
+  .run .meta { color: var(--muted); font-size: 13px; margin: 2px 0 14px; word-break: break-all; }
+  .tag { display: inline-block; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 1px 9px;
+         margin-left: 8px; vertical-align: 2px; }
+  .tag.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .tag.bad { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
+  .tag.latest { background: var(--chip); color: var(--muted); }
+  .counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .count { background: var(--chip); border-radius: 8px; padding: 8px 12px; }
+  .count b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .count span { color: var(--muted); font-size: 13px; }
+  .count.rejected b { color: var(--bad); }
+  .check { margin: 0 0 14px; font-size: 14px; }
+  .check.ok { color: var(--ok); } .check.bad { color: var(--bad); font-weight: 600; }
+  details { border-top: 1px solid var(--line); padding: 10px 0 2px; }
+  summary { cursor: pointer; font-weight: 600; }
+  summary .n { color: var(--muted); font-weight: 400; }
+  .scroll { overflow-x: auto; margin-top: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th, td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--chip);
+         padding: 1px 4px; border-radius: 4px; word-break: break-all; }
+  ul.reasons { margin: 0; padding-left: 18px; }
+  .todo { color: var(--warn); }
+  .none { color: var(--muted); font-style: italic; margin: 8px 0; }
+  .more { margin: 8px 0; }
+  .more button { background: none; border: 1px solid var(--line); color: var(--text); border-radius: 6px;
+                 padding: 4px 10px; cursor: pointer; }
+  .summaryline { margin: 6px 0 0; font-size: 13.5px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Ingestion Report</h1>
+  <p class="sub">Shows every run recorded in <code>ingestion-log.json</code>, newest first.</p>
+  <label class="open" for="file" tabindex="0" id="openLabel">Open ingestion-log.json</label>
+  <input type="file" id="file" accept=".json,application/json">
+  <p id="status">No log opened yet.</p>
+  <div id="runs"></div>
+</main>
+<script>
+(function () {
+  "use strict";
+  var PAGE = 200;   // rows shown at a time in long lists
+  var fileInput = document.getElementById("file");
+  var statusEl = document.getElementById("status");
+  var runsEl = document.getElementById("runs");
+
+  document.getElementById("openLabel").addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+  });
+
+  fileInput.addEventListener("change", function () {
+    var f = fileInput.files[0];
+    if (!f) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var runs;
+      try { runs = JSON.parse(reader.result); }
+      catch (err) { return fail(f.name + " is not valid JSON: " + err.message); }
+      if (!Array.isArray(runs)) return fail(f.name + " does not contain a list of runs.");
+      render(runs, f.name);
+    };
+    reader.onerror = function () { fail("Could not read " + f.name + "."); };
+    reader.readAsText(f);
+  });
+
+  function fail(msg) { statusEl.textContent = msg; statusEl.className = "error"; runsEl.textContent = ""; }
+
+  function el(tag, attrs, children) {
+    var n = document.createElement(tag);
+    if (attrs) for (var k in attrs) {
+      if (k === "text") n.textContent = attrs[k]; else if (k === "cls") n.className = attrs[k]; else n.setAttribute(k, attrs[k]);
+    }
+    (children || []).forEach(function (c) { if (c != null) n.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+    return n;
+  }
+  function fmtTime(iso) {
+    var d = new Date(iso);
+    return isNaN(d) ? String(iso) : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" });
+  }
+  function val(v) { return (v === null || v === undefined || v === "") ? "—" : String(v); }
+  function codeCell(v) { return el("td", null, [ (v === null || v === undefined || v === "") ? "—" : el("code", { text: String(v) }) ]); }
+
+  function render(runs, fname) {
+    runsEl.textContent = "";
+    statusEl.className = "";
+    statusEl.textContent = "Opened " + fname + ": " + runs.length + " run" + (runs.length === 1 ? "" : "s") + ".";
+    runs.slice().reverse().forEach(function (run, i) { runsEl.appendChild(renderRun(run, runs.length - i, i === 0)); });
+  }
+
+  function renderRun(run, number, latest) {
+    var c = run.counts || {};
+    var rejected = run.rejected_rows || [], skipped = run.skipped_rows || [],
+        updated = run.updated_rows || [], warnings = run.warnings || [];
+    var addsUp = run.counts_add_up === true;
+    var allIn = (c.rejected || 0) === 0;
+
+    var head = el("h2", null, [
+      "Run " + number + ": " + val(run.file),
+      latest ? el("span", { cls: "tag latest", text: "latest" }) : null,
+      el("span", { cls: "tag " + (allIn ? "ok" : "bad"),
+                   text: allIn ? "nothing rejected" : (c.rejected + " rejected – action needed") })
+    ]);
+    var meta = el("div", { cls: "meta", text: fmtTime(run.ran_at) + " · " + val(run.file_path) + " → " + val(run.database) });
+
+    var counts = el("div", { cls: "counts" }, [
+      count("read", c.read), count("loaded", c.loaded), count("updated", c.updated),
+      count("skipped (already exist)", c.skipped_already_exists), count("rejected", c.rejected, "rejected"),
+      count("warnings", warnings.length)
+    ]);
+    var check = el("p", { cls: "check " + (addsUp ? "ok" : "bad"),
+      text: addsUp
+        ? "✓ Every row is accounted for: " + c.loaded + " + " + c.updated + " + " + c.skipped_already_exists + " + " + c.rejected + " = " + c.read + " read."
+        : "✗ The counts do not add up to the rows read. Some rows are unaccounted for." });
+
+    var card = el("section", { cls: "run" }, [head, meta, counts, check]);
+
+    card.appendChild(section("Rejected rows – not loaded, need action", rejected.length, true,
+      ["Line", "book_id", "Title", "isbn", "isbn13", "Why", "What to do"],
+      rejected, function (r) {
+        return el("tr", null, [
+          el("td", { cls: "num", text: val(r.line) }), el("td", { cls: "num", text: val(r.book_id) }),
+          el("td", { text: val(r.title) }), codeCell(r.isbn), codeCell(r.isbn13),
+          el("td", null, [ el("ul", { cls: "reasons" }, (r.reasons || []).map(function (x) { return el("li", { text: x }); })) ]),
+          el("td", { cls: "todo", text: (r.what_to_do || []).join(" ") })
+        ]);
+      }, "No rows were rejected."));
+
+    card.appendChild(section("Skipped rows – not loaded because they already exist", skipped.length, false,
+      ["Line", "book_id", "Title", "Reason"], skipped, function (r) {
+        return el("tr", null, [ el("td", { cls: "num", text: val(r.line) }), el("td", { cls: "num", text: val(r.book_id) }),
+                                el("td", { text: val(r.title) }), el("td", { text: val(r.reason) }) ]);
+      }, "No rows were skipped."));
+
+    card.appendChild(section("Updated rows – already in the database, something changed", updated.length, false,
+      ["Line", "book_id", "Title", "Changes (old → new)"], updated, function (r) {
+        return el("tr", null, [ el("td", { cls: "num", text: val(r.line) }), el("td", { cls: "num", text: val(r.book_id) }),
+          el("td", { text: val(r.title) }),
+          el("td", null, [ el("ul", { cls: "reasons" }, (r.changes || []).map(function (ch) {
+            return el("li", null, [ el("code", { text: ch.field }), " " + val(ch.old) + " → " + val(ch.new) ]); })) ]) ]);
+      }, "No rows were updated."));
+
+    var warnSec = section("Warnings – loaded or updated, but something was repaired, calculated or dropped",
+      warnings.length, false, ["Line", "book_id", "Title", "Status", "Warning"], warnings, function (w) {
+        return el("tr", null, [ el("td", { cls: "num", text: val(w.line) }), el("td", { cls: "num", text: val(w.book_id) }),
+          el("td", { text: val(w.title) }), el("td", { text: val(w.status) }), el("td", { text: val(w.warning) }) ]);
+      }, "No warnings.");
+    if (warnings.length) warnSec.insertBefore(warningSummary(warnings), warnSec.children[1]);
+    card.appendChild(warnSec);
+    return card;
+  }
+
+  function count(label, n, cls) {
+    return el("div", { cls: "count" + (cls ? " " + cls : "") }, [ el("b", { text: val(n) }), el("span", { text: label }) ]);
+  }
+
+  // A collapsible table that only builds its rows when opened, PAGE at a time.
+  function section(title, n, open, headers, rows, rowFn, emptyText) {
+    var d = el("details", open && n ? { open: "" } : null, [ el("summary", null, [ title + " ", el("span", { cls: "n", text: "(" + n + ")" }) ]) ]);
+    if (!n) { d.appendChild(el("p", { cls: "none", text: emptyText })); return d; }
+    var built = false;
+    function build() {
+      if (built) return; built = true;
+      var tbody = el("tbody");
+      var table = el("table", null, [ el("thead", null, [ el("tr", null, headers.map(function (h) { return el("th", { text: h }); })) ]), tbody ]);
+      d.appendChild(el("div", { cls: "scroll" }, [table]));
+      var shown = 0, more = el("div", { cls: "more" });
+      function showMore() {
+        rows.slice(shown, shown + PAGE).forEach(function (r) { tbody.appendChild(rowFn(r)); });
+        shown = Math.min(rows.length, shown + PAGE);
+        more.textContent = "";
+        if (shown < rows.length) {
+          var b = el("button", { type: "button", text: "Show more (" + shown + " of " + rows.length + " shown)" });
+          b.addEventListener("click", showMore); more.appendChild(b);
+        }
+      }
+      d.appendChild(more); showMore();
+    }
+    if (open) build();
+    d.addEventListener("toggle", function () { if (d.open) build(); });
+    return d;
+  }
+
+  // Group warnings by kind so the totals are readable before opening the full list.
+  function warningSummary(warnings) {
+    var kinds = {};
+    warnings.forEach(function (w) {
+      var t = String(w.warning || "");
+      var k = t.replace(/'[^']*'/g, "…").replace(/\b97[89]\d{10}\b|\b\d{9}[\dX]\b/g, "…").replace(/\(\d+\)/g, "");
+      kinds[k] = (kinds[k] || 0) + 1;
+    });
+    var ul = el("ul", { cls: "reasons summaryline" });
+    Object.keys(kinds).sort(function (a, b) { return kinds[b] - kinds[a]; }).forEach(function (k) {
+      ul.appendChild(el("li", { text: kinds[k] + " × " + k }));
+    });
+    return ul;
+  }
+})();
+</script>
+</body>
+</html>
